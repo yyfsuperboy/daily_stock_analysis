@@ -166,6 +166,8 @@ class ShareImageBranding:
 
     xiaohongshu_url: str = ""
     xiaohongshu_handle: str = ""
+    # Kept for compatibility with persisted configs. The poster deliberately
+    # renders only the public nickname/handle below the QR code.
     xiaohongshu_id: str = ""
     xiaohongshu_qr_path: str = ""
 
@@ -174,7 +176,6 @@ class ShareImageBranding:
         return any((
             self.xiaohongshu_url.strip(),
             self.xiaohongshu_handle.strip(),
-            self.xiaohongshu_id.strip(),
             self.xiaohongshu_qr_path.strip(),
         ))
 
@@ -187,7 +188,7 @@ def share_image_branding_from_config(config: object) -> ShareImageBranding:
     account_id = str(getattr(config, "share_image_xiaohongshu_id", None) or "").strip()
     qr_path = str(getattr(config, "share_image_xiaohongshu_qr_path", None) or "").strip()
 
-    if not any((url, handle, account_id, qr_path)):
+    if not any((url, handle, qr_path)):
         handle = DEFAULT_XIAOHONGSHU_HANDLE
         qr_path = DEFAULT_XIAOHONGSHU_QR_PATH
 
@@ -362,6 +363,12 @@ def _poster_language(
 
 def _poster_text(language: str, key: str) -> str:
     return _POSTER_TEXT.get(language, _POSTER_TEXT["zh"]).get(key, _POSTER_TEXT["zh"].get(key, key))
+
+
+def _poster_html_language(language: str) -> str:
+    """Map the supported report language, not the market region, to HTML lang."""
+
+    return {"zh": "zh-CN", "en": "en", "ko": "ko"}.get(language, "zh-CN")
 
 
 def _poster_label(language: str, label: str) -> str:
@@ -1995,11 +2002,8 @@ def _xiaohongshu_card(branding: ShareImageBranding, language: str) -> str:
         return ""
 
     label = _poster_text(language, "xiaohongshu")
-    account_parts = [part for part in (
-        branding.xiaohongshu_handle.strip(),
-        f"ID {branding.xiaohongshu_id.strip()}" if branding.xiaohongshu_id.strip() else "",
-    ) if part]
-    account = " · ".join(account_parts) or branding.xiaohongshu_url.strip()
+    handle = branding.xiaohongshu_handle.strip()
+    account = handle or branding.xiaohongshu_url.strip()
     qr_data_uri = _asset_data_uri(branding.xiaohongshu_qr_path)
     qr_alt = f"{label}二维码" if language == "zh" else f"{label} QR"
     image = (
@@ -2009,9 +2013,8 @@ def _xiaohongshu_card(branding: ShareImageBranding, language: str) -> str:
     url = _safe_web_url(branding.xiaohongshu_url)
     if image and url:
         image = f'<a href="{_escape(url)}">{image}</a>'
-    account_markup = (
-        f'<span><b>{_escape(label)}</b>{(" " + _escape(account)) if account else ""}</span>'
-    )
+    separator = "" if handle.startswith("@") else (" " if account else "")
+    account_markup = f'<span><b>{_escape(label)}</b>{separator}{_escape(account)}</span>'
     if url:
         account_markup = f'<a class="social-link" href="{_escape(url)}">{account_markup}</a>'
     return (
@@ -2114,7 +2117,7 @@ def build_share_image_html(
     poster_branding = branding or ShareImageBranding()
 
     return f"""<!DOCTYPE html>
-<html lang="{'en' if language == 'en' else 'ko' if language == 'ko' else 'zh-CN'}">
+<html lang="{_poster_html_language(language)}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=1080, initial-scale=1">
@@ -2122,7 +2125,9 @@ def build_share_image_html(
   <style>
     * {{ box-sizing: border-box; }}
     html, body {{ margin: 0; width: 1080px; background: #eef4fd; }}
-    body {{ color: #081b40; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Microsoft YaHei", Arial, sans-serif; font-size: 22px; line-height: 1.5; -webkit-font-smoothing: antialiased; }}
+    body {{ color: #081b40; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "Noto Sans CJK SC", "Noto Sans CJK KR", Arial, sans-serif; font-size: 22px; line-height: 1.5; -webkit-font-smoothing: antialiased; }}
+    html[lang="zh-CN"] body {{ font-family: "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }}
+    html[lang="ko"] body {{ font-family: "Noto Sans CJK KR", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }}
     .poster {{ width: 1080px; padding: 38px 34px 24px; border: 1px solid #aebdd4; border-radius: 28px; background: radial-gradient(circle at 92% 6%, rgba(48,123,255,.15), transparent 260px), linear-gradient(180deg,#fff 0%,#fbfdff 78%,#eef5ff 100%); }}
     .poster-header {{ display: table; width: 100%; margin-bottom: 28px; }}
     .brand, .meta {{ display: table-cell; vertical-align: middle; }}
