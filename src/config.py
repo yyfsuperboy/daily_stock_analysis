@@ -121,7 +121,11 @@ _FALLBACK_LITELLM_MODEL_PROVIDERS = _MANAGED_LITELLM_KEY_PROVIDERS | set(SUPPORT
 }
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 PROMPT_CACHE_DIAGNOSTICS_LEVELS = {"off", "basic", "debug"}
-SUPPORTED_AGENT_BACKENDS = {"auto", "litellm", "codex_app_server"}
+SUPPORTED_AGENT_BACKENDS = {"auto", "litellm"}
+AGENT_BACKEND_REMOVED_MESSAGE = (
+    "Codex App Server 问股后端已移除。请在 Agent 设置中主动改为默认执行方式，并配置所需模型来源。"
+    "独立 Codex CLI 普通报告不受本项移除影响。"
+)
 TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive", "backward_additive"}
 # 沪深300 / 中证500 / 创业板 / 红利低波 / 纳指 / 黄金；防守资产为货币 ETF
 DEFAULT_ETF_ROTATION_POOL = ("510300", "510500", "159915", "512890", "513100", "518880")
@@ -1012,7 +1016,7 @@ class Config:
     generation_backend_max_concurrency: int = DEFAULT_GENERATION_BACKEND_MAX_CONCURRENCY
     local_cli_backend_max_concurrency: int = DEFAULT_LOCAL_CLI_BACKEND_MAX_CONCURRENCY
     opencode_cli_model: str = ""
-    # LiteLLM unified model config (provider/model format, e.g. gemini/gemini-3.1-pro-preview)
+    # LiteLLM unified model config (provider/model format, e.g. gemini/gemini-3.6-flash)
     litellm_model: str = ""  # Primary model; must include provider prefix when set explicitly
     litellm_fallback_models: List[str] = field(default_factory=list)  # Cross-model fallback list
 
@@ -1051,8 +1055,8 @@ class Config:
 
     # Legacy single-key fields (kept for backward compatibility; gemini_api_keys[0] when set)
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.1-pro-preview"  # 主模型
-    gemini_model_fallback: str = "gemini-3-flash-preview"  # 备选模型
+    gemini_model: str = "gemini-3.6-flash"  # 主模型
+    gemini_model_fallback: str = "gemini-3.5-flash-lite"  # 备选模型
     gemini_temperature: float = 0.7  # 温度参数（0.0-2.0，控制输出随机性，默认0.7）
 
     # Gemini API 请求配置（防止 429 限流）
@@ -1069,13 +1073,13 @@ class Config:
     # OpenAI 兼容 API（备选，当 Gemini/Anthropic 不可用时使用）
     openai_api_key: Optional[str] = None
     openai_base_url: Optional[str] = None  # 如: https://api.openai.com/v1
-    openai_model: str = "gpt-5.5"  # OpenAI 兼容模型名称
+    openai_model: str = "gpt-6.1-sol"  # OpenAI 兼容模型名称
     openai_vision_model: Optional[str] = None  # Deprecated: use VISION_MODEL instead
     openai_temperature: float = 0.7  # OpenAI 温度参数（0.0-2.0，默认0.7）
 
     # === Vision 配置 ===
     # VISION_MODEL: litellm model string used for image understanding calls.
-    # Fallback chain: VISION_MODEL → OPENAI_VISION_MODEL → gemini/gemini-2.0-flash
+    # Fallback chain: VISION_MODEL → OPENAI_VISION_MODEL → gemini/gemini-3.6-flash
     vision_model: str = ""
     # VISION_PROVIDER_PRIORITY: comma-separated provider order for Vision fallback.
     vision_provider_priority: str = "gemini,anthropic,openai"
@@ -1317,6 +1321,9 @@ class Config:
     schedule_time: str = "18:00"              # 每日推送时间（HH:MM 格式）
     schedule_times: List[str] = field(default_factory=lambda: ["18:00"])
     schedule_run_immediately: bool = True     # 启动时是否立即执行一次
+    # 定时模式启动立即执行的当日去重开关：当天已有成功全量分析记录时跳过启动补跑；
+    # 设为 false 可完全旁路该行为（回到上游"每次启动都立即执行"的现状）
+    schedule_startup_dedup: bool = True
     run_immediately: bool = True              # 启动时是否立即执行一次（非定时模式）
     market_review_enabled: bool = True        # 是否启用大盘复盘
     daily_market_context_enabled: bool = True   # 是否将大盘环境摘要用于个股分析 Prompt 与保守护栏
@@ -1433,6 +1440,11 @@ class Config:
             "SCHEDULE_TIME",
             "SCHEDULE_TIMES",
             "SCHEDULE_RUN_IMMEDIATELY",
+            # Same startup-key treatment as SCHEDULE_RUN_IMMEDIATELY: a
+            # bootstrap process env value (docker -e / compose / shell
+            # export) that differs from the persisted .env must win, while
+            # a WebUI .env edit still takes effect on reload (PR #2366).
+            "SCHEDULE_STARTUP_DEDUP",
         }
     )
     _BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = False
@@ -1626,12 +1638,11 @@ class Config:
         # the higher-priority sources and Hermes blocking issues are known.
         litellm_model_explicit = os.getenv('LITELLM_MODEL', '').strip()
         litellm_model = litellm_model_explicit
-        inferred_legacy_deepseek_model = False
         _openai_model_env = os.getenv('OPENAI_MODEL', '').strip()
         if using_anspire_llm_legacy:
             _openai_model_name = _anspire_llm_model_env or _openai_model_env or ANSPIRE_LLM_MODEL_DEFAULT
         else:
-            _openai_model_name = _openai_model_env or 'gpt-5.5'
+            _openai_model_name = _openai_model_env or 'gpt-6.1-sol'
 
         # LITELLM_FALLBACK_MODELS: comma-separated list of fallback models
         _fallback_str = os.getenv('LITELLM_FALLBACK_MODELS', '')
@@ -1700,15 +1711,14 @@ class Config:
                 llm_models_source = "legacy_env"
 
             if not litellm_model:
-                _gemini_model_name = os.getenv('GEMINI_MODEL', 'gemini-3.1-pro-preview').strip()
+                _gemini_model_name = os.getenv('GEMINI_MODEL', 'gemini-3.6-flash').strip()
                 _anthropic_model_name = os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-4-6').strip()
                 if gemini_api_keys:
                     litellm_model = f'gemini/{_gemini_model_name}'
                 elif anthropic_api_keys:
                     litellm_model = f'anthropic/{_anthropic_model_name}'
                 elif deepseek_api_keys:
-                    litellm_model = 'deepseek/deepseek-chat'
-                    inferred_legacy_deepseek_model = True
+                    litellm_model = 'deepseek/deepseek-v4-flash'
                 elif openai_api_keys:
                     # For openai-compatible models, add prefix only if not already prefixed
                     if '/' not in _openai_model_name:
@@ -1718,21 +1728,10 @@ class Config:
 
             if not litellm_fallback_models and not litellm_fallback_models_explicit:
                 # Backward compat: use gemini_model_fallback when primary is gemini
-                _gemini_fallback = os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-3-flash-preview').strip()
+                _gemini_fallback = os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-3.5-flash-lite').strip()
                 if litellm_model.startswith('gemini/') and _gemini_fallback:
                     _fb = f'gemini/{_gemini_fallback}' if '/' not in _gemini_fallback else _gemini_fallback
                     litellm_fallback_models = [_fb]
-
-        if (
-            inferred_legacy_deepseek_model
-            and llm_models_source == "legacy_env"
-            and litellm_model == 'deepseek/deepseek-chat'
-        ):
-            logger.warning(
-                "Deprecation warning:\n"
-                "deepseek-chat will be deprecated on 2026-07-24,\n"
-                "please migrate to deepseek-v4-flash."
-            )
 
         generation_backend = (
             os.getenv('GENERATION_BACKEND', LITELLM_BACKEND_ID).strip().lower()
@@ -1884,6 +1883,18 @@ class Config:
                 if schedule_run_immediately_env is not None
                 else legacy_run_immediately
             )
+        # Startup-immediate run daily dedup switch (schedule mode only).
+        # Unset keeps the dedup enabled; explicit "false" restores the
+        # upstream "run on every startup" behavior.
+        schedule_startup_dedup_env = cls._resolve_env_value(
+            'SCHEDULE_STARTUP_DEDUP',
+            prefer_env_file=True,
+        )
+        schedule_startup_dedup = (
+            schedule_startup_dedup_env.lower() == 'true'
+            if schedule_startup_dedup_env is not None
+            else True
+        )
         schedule_time_value = cls._resolve_env_value(
             'SCHEDULE_TIME',
             default='18:00',
@@ -1963,8 +1974,8 @@ class Config:
             openai_api_keys=openai_api_keys,
             deepseek_api_keys=deepseek_api_keys,
             gemini_api_key=os.getenv('GEMINI_API_KEY'),
-            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-3.1-pro-preview'),
-            gemini_model_fallback=os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-3-flash-preview'),
+            gemini_model=os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'),
+            gemini_model_fallback=os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-3.5-flash-lite'),
             gemini_temperature=parse_env_float(os.getenv('GEMINI_TEMPERATURE'), 0.7, field_name='GEMINI_TEMPERATURE'),
             gemini_request_delay=parse_env_float(os.getenv('GEMINI_REQUEST_DELAY'), 2.0, field_name='GEMINI_REQUEST_DELAY', minimum=0.0),
             gemini_max_retries=parse_env_int(os.getenv('GEMINI_MAX_RETRIES'), 5, field_name='GEMINI_MAX_RETRIES', minimum=0),
@@ -1978,7 +1989,7 @@ class Config:
             # Overall provider fallback order: Gemini > Anthropic > OpenAI-compatible (incl. AIHubmix).
             # base_url is auto-set to aihubmix.com/v1 when AIHUBMIX_KEY is used and no explicit
             # OPENAI_BASE_URL override is provided.
-            # Model names match upstream (e.g. gemini-3.1-pro-preview, gpt-5.5, deepseek-v4-flash).
+            # Model names match upstream (e.g. gemini-3.6-flash, gpt-6.1-sol, deepseek-v4-flash).
             openai_api_key=openai_api_keys[0] if openai_api_keys else None,
             openai_base_url=openai_base_url,
             openai_model=_openai_model_name,
@@ -2324,6 +2335,7 @@ class Config:
                 fallback_time=(schedule_time_value or '18:00').strip() or '18:00',
             ),
             schedule_run_immediately=schedule_run_immediately,
+            schedule_startup_dedup=schedule_startup_dedup,
             run_immediately=legacy_run_immediately,
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
             daily_market_context_enabled=os.getenv('DAILY_MARKET_CONTEXT_ENABLED', 'true').lower() == 'true',
@@ -2501,7 +2513,7 @@ class Config:
             LLM_AIHUBMIX_API_SURFACE=chat_completions
             LLM_AIHUBMIX_BASE_URL=https://aihubmix.com/v1
             LLM_AIHUBMIX_API_KEY=sk-xxx           (or LLM_AIHUBMIX_API_KEYS=k1,k2)
-            LLM_AIHUBMIX_MODELS=gpt-5.5,claude-sonnet-4-6
+            LLM_AIHUBMIX_MODELS=gpt-6.1-sol,claude-sonnet-4-6
             LLM_AIHUBMIX_ENABLED=true
         """
         import logging
@@ -3341,22 +3353,19 @@ class Config:
                 ),
                 field="AGENT_GENERATION_BACKEND",
             ))
-        if agent_backend not in SUPPORTED_AGENT_BACKENDS:
+        if agent_backend == "codex_app_server":
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=AGENT_BACKEND_REMOVED_MESSAGE,
+                field="AGENT_BACKEND",
+                code="backend_removed",
+            ))
+        elif agent_backend not in SUPPORTED_AGENT_BACKENDS:
             issues.append(ConfigIssue(
                 severity="error",
-                message=(
-                    "AGENT_BACKEND 当前支持 auto、litellm、codex_app_server。"
-                    f"已配置的值为：{agent_backend}。"
-                ),
+                message=f"AGENT_BACKEND 当前支持 auto、litellm。已配置的值为：{agent_backend}。",
                 field="AGENT_BACKEND",
                 code="capability_unsupported",
-            ))
-        if agent_backend == "codex_app_server" and self.agent_arch != "single":
-            issues.append(ConfigIssue(
-                severity="error",
-                message="Codex 本地 Agent 当前只支持单 Agent 问股，请将 AGENT_ARCH 设为 single。",
-                field="AGENT_ARCH",
-                code="unsupported_agent_arch",
             ))
         litellm_model_lower = (self.litellm_model or "").strip().lower()
         local_model_prefix = next(
@@ -3434,9 +3443,9 @@ class Config:
                 issues.append(ConfigIssue(
                     severity="error",
                     message=(
-                        "未配置任何可用的 AI 模型接入。请至少配置 ANSPIRE_API_KEYS、"
-                        "AIHUBMIX_KEY、GEMINI_API_KEY、ANTHROPIC_API_KEY、"
-                        "OPENAI_API_KEY 或 DEEPSEEK_API_KEY 中的一个，或配置 "
+                        "未配置任何可用的 AI 模型接入。请至少配置 AIHUBMIX_KEY、"
+                        "GEMINI_API_KEY、ANTHROPIC_API_KEY、"
+                        "OPENAI_API_KEY、DEEPSEEK_API_KEY 或 ANSPIRE_API_KEYS 中的一个，或配置 "
                         "LITELLM_CONFIG / LLM_CHANNELS 可用模型渠道。"
                     ),
                     field="LITELLM_CONFIG",
@@ -3446,7 +3455,7 @@ class Config:
                 severity="info",
                 message=(
                     "尚未明确指定主模型，系统将自动从可用 API Key 推断。"
-                    "建议尽早配置主模型（格式如 gemini/gemini-3.1-pro-preview）"
+                    "建议尽早配置主模型（格式如 gemini/gemini-3.6-flash）"
                 ),
                 field="LITELLM_MODEL",
             ))
